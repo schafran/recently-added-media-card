@@ -156,6 +156,7 @@ tmdb_api_key: YOUR_TMDB_READ_ACCESS_TOKEN
 | `emby_user_id` | string | — | Emby user ID |
 | `movies_count` | number | `5` | Number of recently added movies to display |
 | `shows_count` | number | `5` | Number of recently added TV shows to display |
+| `max_age` | string | — | Only show items added within this window, e.g. `5d`, `12h`. Leave blank to disable — `movies_count`/`shows_count` still cap the result |
 || `cycle_interval` | number | `8` | Seconds between cycling to the next item |
 || `title` | string | `"Recently Added"` | Header text (set to empty string to hide) |
 || `theme` | string | `"auto"` | Colour theme: `auto`, `plex`, `kodi`, `jellyfin`, `emby`, `dark`, `midnight`, `sunset`, `forest` |

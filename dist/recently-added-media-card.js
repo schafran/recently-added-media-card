@@ -201,6 +201,15 @@ class RecentlyAddedMediaCardEditor extends HTMLElement {
             <input type="number" id="shows_count" min="1" max="20" value="${escapeAttr(cfg.shows_count !== undefined ? cfg.shows_count : 5)}">
           </div>
         </div>
+        <div class="field-row">
+          <label>Max Age (limit by time)</label>
+          <input type="text" id="max_age" placeholder="e.g. 5d, 12h (optional)" value="${escapeAttr(cfg.max_age)}">
+          <span class="helper">Only show items added within this window. Leave blank to disable — Movies/TV Shows Count still applies as a cap.</span>
+        </div>
+        <div class="toggle-row">
+          <span>Hide Card When Empty</span>
+          <input type="checkbox" id="hide_when_empty" ${cfg.hide_when_empty ? 'checked' : ''}>
+        </div>
         <div class="grid-2">
           <div class="field-row">
             <label>Cycle Interval (seconds)</label>
@@ -293,7 +302,7 @@ class RecentlyAddedMediaCardEditor extends HTMLElement {
       'kodi_url', 'kodi_username', 'kodi_password',
       'jellyfin_url', 'jellyfin_api_key', 'jellyfin_user_id',
       'emby_url', 'emby_api_key', 'emby_user_id',
-      'movies_count', 'shows_count', 'cycle_interval', 'title',
+      'movies_count', 'shows_count', 'max_age', 'cycle_interval', 'title',
       'theme', 'card_height', 'tmdb_api_key', 'trailer_mode',
     ];
 
@@ -317,7 +326,7 @@ class RecentlyAddedMediaCardEditor extends HTMLElement {
     // Checkbox toggles must send their checked state, not el.value (which
     // is always "on" for a checkbox). The generic handler above can't be
     // used for these, or saving silently breaks.
-    ['mobile_mode', 'show_shimmer'].forEach(id => {
+    ['mobile_mode', 'show_shimmer', 'hide_when_empty'].forEach(id => {
       const el = root.getElementById(id);
       if (el) {
         el.addEventListener('change', () => {
@@ -658,6 +667,9 @@ class RecentlyAddedMediaCard extends HTMLElement {
     const token = this._config.plex_token;
     const moviesCount = this._config.movies_count;
     const showsCount = this._config.shows_count;
+    const cutoff = this._maxAgeCutoff();
+    const moviesLimit = cutoff !== null ? Math.max(moviesCount * 2, 50) : moviesCount * 2;
+    const showsLimit = cutoff !== null ? Math.max(showsCount * 4, 100) : showsCount * 4;
 
     const sectionsResp = await fetch(`${base}/library/sections?X-Plex-Token=${token}`, { headers: { Accept: 'application/json' } });
     if (!sectionsResp.ok) throw new Error(`HTTP ${sectionsResp.status}`);
@@ -671,7 +683,7 @@ class RecentlyAddedMediaCard extends HTMLElement {
     let movies = [];
     for (const section of movieSections) {
       const resp = await fetch(
-        `${base}/library/sections/${section.key}/recentlyAdded?X-Plex-Token=${token}&limit=${moviesCount * 2}`,
+        `${base}/library/sections/${section.key}/recentlyAdded?X-Plex-Token=${token}&limit=${moviesLimit}`,
         { headers: { Accept: 'application/json' } }
       );
       if (resp.ok) {
@@ -680,13 +692,14 @@ class RecentlyAddedMediaCard extends HTMLElement {
       }
     }
     movies.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+    if (cutoff !== null) movies = movies.filter(m => (m.addedAt || 0) >= cutoff);
     movies = movies.slice(0, moviesCount);
 
     // Fetch TV
     let tvItems = [];
     for (const section of tvSections) {
       const resp = await fetch(
-        `${base}/library/sections/${section.key}/recentlyAdded?X-Plex-Token=${token}&limit=${showsCount * 4}`,
+        `${base}/library/sections/${section.key}/recentlyAdded?X-Plex-Token=${token}&limit=${showsLimit}`,
         { headers: { Accept: 'application/json' } }
       );
       if (resp.ok) {
@@ -695,6 +708,7 @@ class RecentlyAddedMediaCard extends HTMLElement {
       }
     }
     tvItems.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+    if (cutoff !== null) tvItems = tvItems.filter(i => (i.addedAt || 0) >= cutoff);
 
     // Deduplicate TV shows
     const seenShows = new Set();
@@ -757,15 +771,18 @@ class RecentlyAddedMediaCard extends HTMLElement {
   async _fetchKodiData() {
     const moviesCount = this._config.movies_count;
     const showsCount = this._config.shows_count;
+    const cutoff = this._maxAgeCutoff();
+    const moviesLimit = cutoff !== null ? Math.max(moviesCount, 50) : moviesCount;
+    const showsLimit = cutoff !== null ? Math.max(showsCount * 4, 100) : showsCount * 4;
 
     const moviesResult = await this._kodiRPC('VideoLibrary.GetRecentlyAddedMovies', {
       properties: ['title', 'year', 'rating', 'runtime', 'genre', 'plot', 'art', 'dateadded', 'mpaa', 'imdbnumber'],
-      limits: { start: 0, end: moviesCount },
+      limits: { start: 0, end: moviesLimit },
     });
 
     const episodesResult = await this._kodiRPC('VideoLibrary.GetRecentlyAddedEpisodes', {
       properties: ['title', 'showtitle', 'season', 'episode', 'rating', 'runtime', 'plot', 'art', 'dateadded', 'tvshowid'],
-      limits: { start: 0, end: showsCount * 4 },
+      limits: { start: 0, end: showsLimit },
     });
 
     const rawMovies = moviesResult.movies || [];
@@ -801,10 +818,12 @@ class RecentlyAddedMediaCard extends HTMLElement {
     });
 
     movieItems.sort((a, b) => b.addedAt - a.addedAt);
-    const finalMovies = movieItems.slice(0, moviesCount);
+    const filteredMovies = cutoff !== null ? movieItems.filter(m => m.addedAt >= cutoff) : movieItems;
+    const finalMovies = filteredMovies.slice(0, moviesCount);
 
     // Sort and deduplicate episodes
-    const sortedEpisodes = rawEpisodes.slice().sort((a, b) => parseDate(b.dateadded) - parseDate(a.dateadded));
+    let sortedEpisodes = rawEpisodes.slice().sort((a, b) => parseDate(b.dateadded) - parseDate(a.dateadded));
+    if (cutoff !== null) sortedEpisodes = sortedEpisodes.filter(ep => parseDate(ep.dateadded) >= cutoff);
     const seenShows = new Set();
     const uniqueEpisodes = [];
     for (const ep of sortedEpisodes) {
@@ -845,6 +864,9 @@ class RecentlyAddedMediaCard extends HTMLElement {
     const key = this._config.jellyfin_api_key;
     const moviesCount = this._config.movies_count;
     const showsCount = this._config.shows_count;
+    const cutoff = this._maxAgeCutoff();
+    const moviesLimit = cutoff !== null ? Math.max(moviesCount * 2, 50) : moviesCount * 2;
+    const showsLimit = cutoff !== null ? Math.max(showsCount * 6, 100) : showsCount * 6;
     const userId = await this._resolveJellyfinUserId();
 
     const headers = { Authorization: `MediaBrowser Token="${key}"`, Accept: 'application/json' };
@@ -852,29 +874,31 @@ class RecentlyAddedMediaCard extends HTMLElement {
     const moviesResp = await fetch(
       `${base}/Users/${userId}/Items/Latest` +
         `?IncludeItemTypes=Movie` +
-        `&Limit=${moviesCount * 2}` +
+        `&Limit=${moviesLimit}` +
         `&Fields=Overview,Genres,OfficialRating,CommunityRating,RunTimeTicks,DateCreated,ProviderIds` +
         `&EnableImageTypes=Primary,Backdrop`,
       { headers }
     );
     if (!moviesResp.ok) throw new Error(`Movies fetch failed: HTTP ${moviesResp.status}`);
     const moviesRaw = await moviesResp.json();
-    const moviesArr = Array.isArray(moviesRaw) ? moviesRaw : [];
+    let moviesArr = Array.isArray(moviesRaw) ? moviesRaw : [];
     moviesArr.sort((a, b) => (Date.parse(b.DateCreated) || 0) - (Date.parse(a.DateCreated) || 0));
+    if (cutoff !== null) moviesArr = moviesArr.filter(m => (Date.parse(m.DateCreated) || 0) / 1000 >= cutoff);
     const movies = moviesArr.slice(0, moviesCount);
 
     const showsResp = await fetch(
       `${base}/Users/${userId}/Items/Latest` +
         `?IncludeItemTypes=Episode` +
-        `&Limit=${showsCount * 6}` +
+        `&Limit=${showsLimit}` +
         `&Fields=Overview,Genres,OfficialRating,CommunityRating,RunTimeTicks,DateCreated,SeriesName,SeasonName,IndexNumber,ParentIndexNumber,SeriesId` +
         `&EnableImageTypes=Primary,Backdrop`,
       { headers }
     );
     if (!showsResp.ok) throw new Error(`Shows fetch failed: HTTP ${showsResp.status}`);
     const showsRaw = await showsResp.json();
-    const showsArr = Array.isArray(showsRaw) ? showsRaw : [];
+    let showsArr = Array.isArray(showsRaw) ? showsRaw : [];
     showsArr.sort((a, b) => (Date.parse(b.DateCreated) || 0) - (Date.parse(a.DateCreated) || 0));
+    if (cutoff !== null) showsArr = showsArr.filter(i => (Date.parse(i.DateCreated) || 0) / 1000 >= cutoff);
 
     const seenShows = new Set();
     const uniqueShows = [];
@@ -952,12 +976,15 @@ class RecentlyAddedMediaCard extends HTMLElement {
     const key = this._config.emby_api_key;
     const moviesCount = this._config.movies_count;
     const showsCount = this._config.shows_count;
+    const cutoff = this._maxAgeCutoff();
+    const moviesLimit = cutoff !== null ? Math.max(moviesCount * 2, 50) : moviesCount * 2;
+    const showsLimit = cutoff !== null ? Math.max(showsCount * 6, 100) : showsCount * 6;
     const userId = await this._resolveEmbyUserId();
 
     const moviesResp = await fetch(
       `${base}/Users/${userId}/Items/Latest` +
         `?IncludeItemTypes=Movie` +
-        `&Limit=${moviesCount * 2}` +
+        `&Limit=${moviesLimit}` +
         `&Fields=Overview,Genres,OfficialRating,CommunityRating,RunTimeTicks,DateCreated,ProviderIds` +
         `&EnableImageTypes=Primary,Backdrop` +
         `&api_key=${key}`,
@@ -965,14 +992,15 @@ class RecentlyAddedMediaCard extends HTMLElement {
     );
     if (!moviesResp.ok) throw new Error(`Movies fetch failed: HTTP ${moviesResp.status}`);
     const moviesRaw = await moviesResp.json();
-    const moviesArr = Array.isArray(moviesRaw) ? moviesRaw : [];
+    let moviesArr = Array.isArray(moviesRaw) ? moviesRaw : [];
     moviesArr.sort((a, b) => (Date.parse(b.DateCreated) || 0) - (Date.parse(a.DateCreated) || 0));
+    if (cutoff !== null) moviesArr = moviesArr.filter(m => (Date.parse(m.DateCreated) || 0) / 1000 >= cutoff);
     const movies = moviesArr.slice(0, moviesCount);
 
     const showsResp = await fetch(
       `${base}/Users/${userId}/Items/Latest` +
         `?IncludeItemTypes=Episode` +
-        `&Limit=${showsCount * 6}` +
+        `&Limit=${showsLimit}` +
         `&Fields=Overview,Genres,OfficialRating,CommunityRating,RunTimeTicks,DateCreated,SeriesName,SeasonName,IndexNumber,ParentIndexNumber,ProviderIds,SeriesId` +
         `&EnableImageTypes=Primary,Backdrop` +
         `&api_key=${key}`,
@@ -980,8 +1008,9 @@ class RecentlyAddedMediaCard extends HTMLElement {
     );
     if (!showsResp.ok) throw new Error(`Shows fetch failed: HTTP ${showsResp.status}`);
     const showsRaw = await showsResp.json();
-    const showsArr = Array.isArray(showsRaw) ? showsRaw : [];
+    let showsArr = Array.isArray(showsRaw) ? showsRaw : [];
     showsArr.sort((a, b) => (Date.parse(b.DateCreated) || 0) - (Date.parse(a.DateCreated) || 0));
+    if (cutoff !== null) showsArr = showsArr.filter(i => (Date.parse(i.DateCreated) || 0) / 1000 >= cutoff);
 
     const seenShows = new Set();
     const uniqueShows = [];
@@ -1053,6 +1082,23 @@ class RecentlyAddedMediaCard extends HTMLElement {
     return this._interleave(movieItems, tvDisplayItems);
   }
 
+  // ── Time cutoff utility ───────────────────────────────────────────────────────
+
+  // Parses "5d" / "12h" into seconds, or null if unset/invalid.
+  _parseMaxAge(str) {
+    if (!str) return null;
+    const m = String(str).trim().match(/^(\d+)\s*(h|d)$/i);
+    if (!m) return null;
+    const num = parseInt(m[1], 10);
+    return m[2].toLowerCase() === 'h' ? num * 3600 : num * 86400;
+  }
+
+  // Returns the epoch-seconds cutoff (items older than this are excluded), or null if disabled.
+  _maxAgeCutoff() {
+    const seconds = this._parseMaxAge(this._config.max_age);
+    return seconds === null ? null : (Date.now() / 1000 - seconds);
+  }
+
   // ── Interleave utility ────────────────────────────────────────────────────────
 
   _interleave(movies, tvShows) {
@@ -1095,6 +1141,10 @@ class RecentlyAddedMediaCard extends HTMLElement {
   _updateDisplay() {
     if (!this._items.length) {
       const cfg = this._config || {};
+      if (cfg.hide_when_empty) {
+        this.style.display = 'none';
+        return;
+      }
       const theme = this._getTheme();
       const primaryRgb = this._hexToRgb(theme.primary);
       const root = this.shadowRoot;
@@ -1107,7 +1157,11 @@ class RecentlyAddedMediaCard extends HTMLElement {
       const titleEl = root.querySelector('.item-title');
       if (titleEl) titleEl.textContent = '';
       const subtitleEl = root.querySelector('.item-subtitle');
-      if (subtitleEl) subtitleEl.textContent = `No recently added items available from ${cfg.server_type || 'plex'}. Configure your server URL and token, or check the connection.`;
+      if (subtitleEl) {
+        subtitleEl.textContent = cfg.max_age
+          ? `No items added within the last ${cfg.max_age}. Widen "Max Age" to see more.`
+          : `No recently added items available from ${cfg.server_type || 'plex'}. Configure your server URL and token, or check the connection.`;
+      }
       const typeEl = root.querySelector('.item-type');
       if (typeEl) { typeEl.textContent = 'No items'; typeEl.className = 'item-type movie'; }
       const ratingEl = root.querySelector('.item-rating');
@@ -1124,6 +1178,7 @@ class RecentlyAddedMediaCard extends HTMLElement {
       if (trailerBtn) { trailerBtn.classList.remove('visible'); trailerBtn.onclick = null; }
       return;
     }
+    this.style.display = '';
     const item = this._items[this._currentIndex];
     const root = this.shadowRoot;
 
